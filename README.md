@@ -1,6 +1,10 @@
 # Grida Standard Library
 
-Grida Standard Library is a 100% free & open-source handpicked collection of design assets used by our Editor and our AI.
+Grida Standard Library is a 100% free & open-source handpicked collection of design assets used by [Grida](https://github.com/gridaco/grida)'s editor and AI.
+
+Browse the live library at [grida.co/library](https://grida.co/library).
+
+Categories:
 
 - fonts
 - shapes
@@ -19,7 +23,7 @@ Grida Standard Library is a 100% free & open-source handpicked collection of des
 - doodles
 - scribbles
 
-## (Working Draft) - API comming soon.
+## (Working Draft) — API coming soon
 
 ## The Asset Object Model
 
@@ -60,14 +64,14 @@ Grida Standard Library is a 100% free & open-source handpicked collection of des
 
 ## Metadata
 
-- generator - the generator used to create the asset
+- generator — the generator used to create the asset
   - grida-canvas
   - the-bundle
   - dall-e-3
   - midjourney
   - photoshop
 
-- entropy - the visual complexity of the design
+- entropy — the visual complexity of the design
   - 0 ~ 1
 
 ## Scripts
@@ -86,7 +90,7 @@ uv pip install -r requirements.txt
 # optimize
 python optimize.py optimize ~/Public/library/category  ~/Public/library/category/out --max-size=3
 
-# rmsmall - remove small images
+# rmsmall — remove small images
 python optimize.py rmsmall ~/Public/library/category
 ```
 
@@ -121,3 +125,19 @@ outputs `.object.json` files.
 ```sh
 python upload.py /path/to/process
 ```
+
+## See Also
+
+Other open Grida asset libraries:
+
+- [fonts.grida.co](https://fonts.grida.co) — Google fonts indexed with SVGs & metadata ([gridaco/fonts](https://github.com/gridaco/fonts))
+- [icons.grida.co](https://icons.grida.co) — Grida Icons Library, hand-picked and meta-described ([gridaco/icons](https://github.com/gridaco/icons))
+- [The Bundle](https://grida.co/bundle) — A collection of 3D-rendered illustrations
+
+And the main project:
+
+- [Grida](https://github.com/gridaco/grida) — open-source canvas editor & rendering engine
+
+## License
+
+Released under [CC0 1.0 Universal](./LICENSE) — public domain.
