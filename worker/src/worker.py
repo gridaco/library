@@ -7,7 +7,7 @@ import signal
 import click
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from embedding import embed
+from embedding import embed_image, embed_text, titan_embed_image
 from metadata import object_metadata
 
 QUEUE_NAME = "grida_library_object_worker_jobs"
@@ -23,9 +23,11 @@ BUCLET_NAME = "library"
 #     "mimetype": "<image_mimetype>"
 # }
 #
-# This script polls the queue, processes each task by calling
-# the AWS Titan embedding via `embed()`, stores the result,
-# and acknowledges successful tasks.
+# This script polls the queue and, for each task, computes the Gemini
+# Embedding 2 vectors — image (always) and text (when the object has a
+# description) — and upserts them. During the transition it can also
+# dual-write the legacy Titan image vector so the old `similar()` stays
+# live until the grida-repo cutover migration repoints retrieval.
 # ----------------------------------------------
 
 
@@ -78,14 +80,16 @@ class EmbeddingWorker:
     queue_name: str
     poll_batch_size: int
     visibility_timeout: int
+    dual_write_titan: bool
 
-    def __init__(self, supabase_url, supabase_key, queue_name, poll_batch_size, visibility_timeout):
+    def __init__(self, supabase_url, supabase_key, queue_name, poll_batch_size, visibility_timeout, dual_write_titan=False):
         self.supabase: Client = create_client(supabase_url, supabase_key)
         self.library_client = self.supabase.schema("grida_library")
         self.queue_client = self.supabase.schema("pgmq_public")
         self.queue_name = queue_name
         self.poll_batch_size = poll_batch_size
         self.visibility_timeout = visibility_timeout
+        self.dual_write_titan = dual_write_titan
 
     def q_read(self):
         res = self.queue_client.rpc(
@@ -105,17 +109,31 @@ class EmbeddingWorker:
         ).execute()
         return res.data
 
-    def upsert_embedding(self, object_id: str, vector: list):
-        res = self.library_client.table("object_embedding").upsert({
+    def upsert_embedding(self, object_id: str, image_vec: list, text_vec: list | None = None, titan_vec: list | None = None):
+        row = {
             "object_id": object_id,
-            "embedding": vector
-        }).execute()
+            "gemini_embedding_2__image": image_vec,
+            "gemini_embedding_2__text": text_vec,
+        }
+        if titan_vec is not None:
+            row["embedding"] = titan_vec  # legacy, transition dual-write
+        res = self.library_client.table("object_embedding").upsert(row).execute()
         return res.data
 
     def has_embedding(self, object_id: str):
+        # "done" means the Gemini image vector is present (a row may already
+        # exist with only the legacy Titan column during the transition).
         res = self.library_client.table("object_embedding").select(
-            "object_id", count="exact").eq("object_id", object_id).execute()
+            "object_id", count="exact").eq("object_id", object_id)\
+            .not_.is_("gemini_embedding_2__image", "null").execute()
         return res.count == 1
+
+    def get_object_text(self, object_id: str) -> dict:
+        # maybe_single: a missing object row returns None instead of raising,
+        # so a stale queue message (object deleted) doesn't loop forever.
+        res = self.library_client.table("object").select(
+            "title, description, keywords").eq("id", object_id).maybe_single().execute()
+        return (res.data if res else None) or {}
 
     def update_metadata(self, object_id: str, metadata: dict):
         return self.library_client.table("object").update({
@@ -156,8 +174,23 @@ class EmbeddingWorker:
                         try:
                             # check if the embedding already exists - can happen when embedding ok, metadata fails
                             if not self.has_embedding(object_id):
-                                vector = embed(obj, mimetype)
-                                self.upsert_embedding(object_id, vector)
+                                image_vec = embed_image(obj, mimetype)
+                                # text vector only when the object is described
+                                meta = self.get_object_text(object_id)
+                                text_vec = None
+                                if meta.get("description"):
+                                    parts = [
+                                        meta.get("title"),
+                                        meta.get("description"),
+                                        " ".join(meta.get("keywords") or []),
+                                    ]
+                                    text_vec = embed_text(
+                                        ". ".join(p for p in parts if p))
+                                titan_vec = (
+                                    titan_embed_image(obj, mimetype)
+                                    if self.dual_write_titan else None)
+                                self.upsert_embedding(
+                                    object_id, image_vec, text_vec, titan_vec)
                         except Exception as e:
                             logger.error(
                                 "Embedding error (object_id=%s): %s", object_id, e)
@@ -205,13 +238,18 @@ def ci(env):
     POLL_BATCH_SIZE = int(os.getenv("POLL_BATCH_SIZE", "10"))
     VISIBILITY_TIMEOUT = int(
         os.getenv("VISIBILITY_TIMEOUT", "3600"))  # seconds
+    # Dual-write the legacy Titan vector during the transition so the old
+    # similar() stays live until the grida-repo cutover. Turn off (default)
+    # after cutover + soak; then the Titan path / boto3 can be removed.
+    DUAL_WRITE_TITAN = os.getenv("DUAL_WRITE_TITAN", "false").lower() == "true"
 
     worker = EmbeddingWorker(
         supabase_url=SUPABASE_URL,
         supabase_key=SUPABASE_KEY,
         queue_name=QUEUE_NAME,
         poll_batch_size=POLL_BATCH_SIZE,
-        visibility_timeout=VISIBILITY_TIMEOUT
+        visibility_timeout=VISIBILITY_TIMEOUT,
+        dual_write_titan=DUAL_WRITE_TITAN,
     )
     worker.run()
 

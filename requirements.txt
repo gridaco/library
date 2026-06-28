@@ -1,6 +1,7 @@
 boto3
 click
 cairosvg
+requests
 diffusers
 glom
 ollama
