@@ -7,7 +7,7 @@ import signal
 import click
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from embedding import embed
+from embedding import embed_image, embed_text
 from metadata import object_metadata
 
 QUEUE_NAME = "grida_library_object_worker_jobs"
@@ -23,9 +23,9 @@ BUCLET_NAME = "library"
 #     "mimetype": "<image_mimetype>"
 # }
 #
-# This script polls the queue, processes each task by calling
-# the AWS Titan embedding via `embed()`, stores the result,
-# and acknowledges successful tasks.
+# This script polls the queue and, for each task, computes the Gemini
+# Embedding 2 vectors — image (always) and text (when the object has a
+# description) — and upserts them.
 # ----------------------------------------------
 
 
@@ -105,17 +105,29 @@ class EmbeddingWorker:
         ).execute()
         return res.data
 
-    def upsert_embedding(self, object_id: str, vector: list):
+    def upsert_embedding(self, object_id: str, image_vec: list, text_vec: list | None = None):
         res = self.library_client.table("object_embedding").upsert({
             "object_id": object_id,
-            "embedding": vector
+            "gemini_embedding_2__image": image_vec,
+            "gemini_embedding_2__text": text_vec,
         }).execute()
         return res.data
 
     def has_embedding(self, object_id: str):
+        # "done" means the Gemini image vector is present. A row may already
+        # exist with only the legacy `embedding` column (written by the
+        # pre-migration worker), so check the gemini image column specifically.
         res = self.library_client.table("object_embedding").select(
-            "object_id", count="exact").eq("object_id", object_id).execute()
+            "object_id", count="exact").eq("object_id", object_id)\
+            .not_.is_("gemini_embedding_2__image", "null").execute()
         return res.count == 1
+
+    def get_object_text(self, object_id: str) -> dict:
+        # maybe_single: a missing object row returns None instead of raising,
+        # so a stale queue message (object deleted) doesn't loop forever.
+        res = self.library_client.table("object").select(
+            "title, description, keywords").eq("id", object_id).maybe_single().execute()
+        return (res.data if res else None) or {}
 
     def update_metadata(self, object_id: str, metadata: dict):
         return self.library_client.table("object").update({
@@ -156,8 +168,20 @@ class EmbeddingWorker:
                         try:
                             # check if the embedding already exists - can happen when embedding ok, metadata fails
                             if not self.has_embedding(object_id):
-                                vector = embed(obj, mimetype)
-                                self.upsert_embedding(object_id, vector)
+                                image_vec = embed_image(obj, mimetype)
+                                # text vector only when the object is described
+                                meta = self.get_object_text(object_id)
+                                text_vec = None
+                                if meta.get("description"):
+                                    parts = [
+                                        meta.get("title"),
+                                        meta.get("description"),
+                                        " ".join(meta.get("keywords") or []),
+                                    ]
+                                    text_vec = embed_text(
+                                        ". ".join(p for p in parts if p))
+                                self.upsert_embedding(
+                                    object_id, image_vec, text_vec)
                         except Exception as e:
                             logger.error(
                                 "Embedding error (object_id=%s): %s", object_id, e)
@@ -211,7 +235,7 @@ def ci(env):
         supabase_key=SUPABASE_KEY,
         queue_name=QUEUE_NAME,
         poll_batch_size=POLL_BATCH_SIZE,
-        visibility_timeout=VISIBILITY_TIMEOUT
+        visibility_timeout=VISIBILITY_TIMEOUT,
     )
     worker.run()
 

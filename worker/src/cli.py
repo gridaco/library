@@ -6,7 +6,7 @@ from pathlib import Path
 from tqdm import tqdm
 from supabase import create_client
 from embedding_transform import b64
-from embedding import embed, embed_text
+from embedding import embed_image, embed_text
 
 
 @click.group()
@@ -211,11 +211,15 @@ def test_image(image_path, text):
         image_data = f.read()
 
     start = time.time()
-    embedding = embed(image_data, mimetype, text)
+    embedding = embed_image(image_data, mimetype)
     end = time.time()
 
     click.echo(embedding)
     click.echo(f"Time taken: {end - start} seconds")
+    # image and text are separate single-modality vectors (never fused)
+    if text:
+        click.echo("--- text embedding (separate vector) ---")
+        click.echo(embed_text(text))
     return embedding
 
 
