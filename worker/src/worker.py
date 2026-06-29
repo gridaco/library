@@ -7,7 +7,7 @@ import signal
 import click
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from embedding import embed_image, embed_text, titan_embed_image
+from embedding import embed_image, embed_text
 from metadata import object_metadata
 
 QUEUE_NAME = "grida_library_object_worker_jobs"
@@ -25,9 +25,7 @@ BUCLET_NAME = "library"
 #
 # This script polls the queue and, for each task, computes the Gemini
 # Embedding 2 vectors — image (always) and text (when the object has a
-# description) — and upserts them. During the transition it can also
-# dual-write the legacy Titan image vector so the old `similar()` stays
-# live until the grida-repo cutover migration repoints retrieval.
+# description) — and upserts them.
 # ----------------------------------------------
 
 
@@ -80,16 +78,14 @@ class EmbeddingWorker:
     queue_name: str
     poll_batch_size: int
     visibility_timeout: int
-    dual_write_titan: bool
 
-    def __init__(self, supabase_url, supabase_key, queue_name, poll_batch_size, visibility_timeout, dual_write_titan=False):
+    def __init__(self, supabase_url, supabase_key, queue_name, poll_batch_size, visibility_timeout):
         self.supabase: Client = create_client(supabase_url, supabase_key)
         self.library_client = self.supabase.schema("grida_library")
         self.queue_client = self.supabase.schema("pgmq_public")
         self.queue_name = queue_name
         self.poll_batch_size = poll_batch_size
         self.visibility_timeout = visibility_timeout
-        self.dual_write_titan = dual_write_titan
 
     def q_read(self):
         res = self.queue_client.rpc(
@@ -109,20 +105,18 @@ class EmbeddingWorker:
         ).execute()
         return res.data
 
-    def upsert_embedding(self, object_id: str, image_vec: list, text_vec: list | None = None, titan_vec: list | None = None):
-        row = {
+    def upsert_embedding(self, object_id: str, image_vec: list, text_vec: list | None = None):
+        res = self.library_client.table("object_embedding").upsert({
             "object_id": object_id,
             "gemini_embedding_2__image": image_vec,
             "gemini_embedding_2__text": text_vec,
-        }
-        if titan_vec is not None:
-            row["embedding"] = titan_vec  # legacy, transition dual-write
-        res = self.library_client.table("object_embedding").upsert(row).execute()
+        }).execute()
         return res.data
 
     def has_embedding(self, object_id: str):
-        # "done" means the Gemini image vector is present (a row may already
-        # exist with only the legacy Titan column during the transition).
+        # "done" means the Gemini image vector is present. A row may already
+        # exist with only the legacy `embedding` column (written by the
+        # pre-migration worker), so check the gemini image column specifically.
         res = self.library_client.table("object_embedding").select(
             "object_id", count="exact").eq("object_id", object_id)\
             .not_.is_("gemini_embedding_2__image", "null").execute()
@@ -186,11 +180,8 @@ class EmbeddingWorker:
                                     ]
                                     text_vec = embed_text(
                                         ". ".join(p for p in parts if p))
-                                titan_vec = (
-                                    titan_embed_image(obj, mimetype)
-                                    if self.dual_write_titan else None)
                                 self.upsert_embedding(
-                                    object_id, image_vec, text_vec, titan_vec)
+                                    object_id, image_vec, text_vec)
                         except Exception as e:
                             logger.error(
                                 "Embedding error (object_id=%s): %s", object_id, e)
@@ -238,10 +229,6 @@ def ci(env):
     POLL_BATCH_SIZE = int(os.getenv("POLL_BATCH_SIZE", "10"))
     VISIBILITY_TIMEOUT = int(
         os.getenv("VISIBILITY_TIMEOUT", "3600"))  # seconds
-    # Dual-write the legacy Titan vector during the transition so the old
-    # similar() stays live until the grida-repo cutover. Turn off (default)
-    # after cutover + soak; then the Titan path / boto3 can be removed.
-    DUAL_WRITE_TITAN = os.getenv("DUAL_WRITE_TITAN", "false").lower() == "true"
 
     worker = EmbeddingWorker(
         supabase_url=SUPABASE_URL,
@@ -249,7 +236,6 @@ def ci(env):
         queue_name=QUEUE_NAME,
         poll_batch_size=POLL_BATCH_SIZE,
         visibility_timeout=VISIBILITY_TIMEOUT,
-        dual_write_titan=DUAL_WRITE_TITAN,
     )
     worker.run()
 

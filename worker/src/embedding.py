@@ -12,18 +12,12 @@ by default; we take the first 1536 (Matryoshka truncation) and re-normalize.
 This post-processing MUST match the editor's query embedder so stored and
 query vectors are comparable (the cross-modal floor depends on it).
 
-A legacy Amazon Titan image embedding (1024-d) is kept behind
-`titan_embed_image()` for the transition window only — the worker can
-dual-write it so the old `similar()` stays live until the grida-repo cutover
-migration repoints retrieval. Remove it (and boto3) after cutover + soak.
-
 Verified request shapes (OpenAI-compatible):
   text  -> {"model": M, "input": "some text"}
   image -> {"model": M, "input": [{"content": [
               {"type": "image_url", "image_url": {"url": "data:<mime>;base64,..."}}]}]}
 """
 import os
-import json
 import math
 import requests
 from dotenv import load_dotenv
@@ -37,9 +31,6 @@ EMBEDDINGS_URL = os.getenv(
 EMBEDDINGS_API_KEY = os.getenv("EMBEDDINGS_API_KEY")
 EMBEDDING_MODEL_ID = os.getenv("EMBEDDING_MODEL_ID", "google/gemini-embedding-2")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
-
-# --- legacy Titan (transition dual-write only) ---
-TITAN_MODEL_ID = "amazon.titan-embed-image-v1"
 
 
 class EmbedError(Exception):
@@ -90,28 +81,3 @@ def embed_image(image: str | bytes, mimetype: str) -> list:
 def embed_text(text: str) -> list:
     """Text embedding (1536-d, L2-normalized)."""
     return _embed(text)
-
-
-def titan_embed_image(image: str | bytes, mimetype: str) -> list:
-    """LEGACY: Amazon Titan Multimodal Embeddings G1 (1024-d) via Bedrock.
-    Transition dual-write only — drop after the grida-repo cutover + soak."""
-    import boto3  # lazy: only needed when DUAL_WRITE_TITAN is on
-    body = {
-        "inputImage": b64(image, mimetype),
-        "embeddingConfig": {"outputEmbeddingLength": 1024},
-    }
-    bedrock = boto3.client(
-        service_name="bedrock-runtime",
-        region_name=os.getenv("AWS_REGION", "us-east-1"),
-    )
-    response = bedrock.invoke_model(
-        body=json.dumps(body),
-        modelId=TITAN_MODEL_ID,
-        accept="application/json",
-        contentType="application/json",
-    )
-    response_body = json.loads(response.get("body").read())
-    if response_body.get("message") is not None:
-        raise EmbedError(
-            f"Embeddings generation error: {response_body['message']}")
-    return response_body["embedding"]
