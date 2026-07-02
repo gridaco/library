@@ -14,7 +14,7 @@ BUCKET_NAME = "library"
 @click.argument('input_dir', type=click.Path(exists=True, file_okay=False))
 @click.argument('category')
 @click.option('--folder', show_default=True, help="custom folder in bucket (uses category by default)")
-@click.option('--type', 'file_type', type=click.Choice(['jpg', 'png', 'svg']), default='jpg', show_default=True, help="File type to process")
+@click.option('--type', 'file_type', type=click.Choice(['jpg', 'png', 'svg', 'webp']), default='jpg', show_default=True, help="File type to process")
 @click.option('--env-file', type=click.Path(exists=True, dir_okay=False), default=".env", show_default=True, help="Path to .env file")
 @click.option('--check', is_flag=True, default=False, help="Skip files that are already uploaded based on path")
 def cli(input_dir, category, folder, file_type, env_file, check):
