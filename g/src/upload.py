@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 import os
 import json
-import mimetypes
+import hashlib
 import click
 from pathlib import Path
 from tqdm import tqdm
@@ -9,76 +9,67 @@ from supabase import create_client, Client
 
 BUCKET_NAME = "library"
 
+# Content addressing (#929, grida/docs/wg/platform/library.md §3):
+# identity = sha256 of the stored bytes (lowercase hex, required on INSERT);
+# storage path = flat `<sha256>.<ext>`. The extension map is pinned and
+# mirrored verbatim from the editor producer (LibraryCAS) so every producer
+# derives the same CAS path for the same media type.
+EXT = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/svg+xml": "svg",
+    "image/avif": "avif",
+}
+
+
+def cas_path(digest: str, mimetype: str, fallback_suffix: str) -> str:
+    ext = EXT.get(mimetype) or fallback_suffix.lstrip(".").lower()
+    return f"{digest}.{ext}" if ext else digest
+
+
+def is_duplicate_error(e: Exception) -> bool:
+    # storage-api duplicate shapes: HTTP 409 / statusCode "409" / "Duplicate";
+    # historic servers used HTTP 400 with a 409 body code.
+    s = str(e)
+    return "409" in s or "Duplicate" in s or "already exists" in s.lower()
+
 
 @click.command()
 @click.argument('input_dir', type=click.Path(exists=True, file_okay=False))
 @click.argument('category')
-@click.option('--folder', show_default=True, help="custom folder in bucket (uses category by default)")
+@click.option('--folder', show_default=True, help="legacy folder in bucket (pre-CAS uploads; used only to detect already-uploaded legacy objects)")
 @click.option('--type', 'file_type', type=click.Choice(['jpg', 'png', 'svg', 'webp']), default='jpg', show_default=True, help="File type to process")
 @click.option('--env-file', type=click.Path(exists=True, dir_okay=False), default=".env", show_default=True, help="Path to .env file")
-@click.option('--check', is_flag=True, default=False, help="Skip files that are already uploaded based on path")
-def cli(input_dir, category, folder, file_type, env_file, check):
+def cli(input_dir, category, folder, file_type, env_file):
     load_dotenv(env_file)
     url: str = os.environ.get("SUPABASE_URL")
     key: str = os.environ.get("SUPABASE_KEY")
     supabase: Client = create_client(url, key)
     input_path = Path(input_dir)
     folder = folder or category
+    library = supabase.schema("grida_library")
+
     for file in tqdm(list(input_path.glob(f"*.{file_type}")), desc="Uploading objects"):
         object_path = file.with_name(file.stem + ".object.json")
         if not object_path.exists():
             tqdm.write(f"[SKIP] {file.name}: missing object.json")
             continue
 
-        path = f"{folder}/{file.name}"
-
-        if check:
-            try:
-                existing = supabase.schema("grida_library").table(
-                    "object").select("id").eq("path", path).single().execute()
-                if existing.data:
-                    tqdm.write(f"[SKIP] {file.name}: already uploaded")
-                    continue
-            except Exception:
-                pass
-
         with open(object_path) as f:
             obj = json.load(f)
 
-        mimetype = obj.get("mimetype")
-        content_type = mimetypes.guess_type(
-            file)[0] or "application/octet-stream"
-
-        with open(file, "rb") as fdata:
-            try:
-                res = supabase.storage.from_(BUCKET_NAME).upload(
-                    path, fdata, {"content-type": mimetype or content_type, "x-upsert": "true"})
-
-                # https://github.com/supabase/supabase-py/issues/1111
-                search = supabase.storage.from_(BUCKET_NAME).list(
-                    folder,
-                    {
-                        "limit": 1,
-                        "offset": 0,
-                        "sortBy": {"column": "name", "order": "desc"},
-                        "search": file.name,
-                    }
-                )
-                ref = search[0]
-            except Exception as e:
-                tqdm.write(f"[ERROR] {file.name}: {e}")
-                continue
-
-        uploaded_path = res.path
-        uploaded_obj_id = ref.get("id")
-
-        tqdm.write(f"[OK] uploaded {file.name} to {uploaded_path}")
+        data = file.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        mimetype = obj.get("mimetype") or "application/octet-stream"
+        path = cas_path(digest, mimetype, file.suffix)
+        legacy_path = f"{folder}/{file.name}"
 
         try:
-
             obj_author = obj.get("author")
             if obj_author:
-                author = supabase.schema("grida_library").table("author").upsert(
+                author = library.table("author").upsert(
                     obj_author, on_conflict="provider,username").execute()
                 author_id = author.data[0].get("id")
 
@@ -87,9 +78,7 @@ def cli(input_dir, category, folder, file_type, env_file, check):
                 if v not in (None, [], "", {})
             ]
 
-            supabase.schema("grida_library").table("object").upsert({
-                "id": uploaded_obj_id,
-                "path": uploaded_path,
+            metadata = {
                 "title": obj.get("title"),
                 "alt": obj.get("alt"),
                 "description": obj.get("description"),
@@ -119,7 +108,56 @@ def cli(input_dir, category, folder, file_type, env_file, check):
                 "prompt": obj.get("prompt"),
                 "public_domain": obj.get("public_domain", False),
                 "sys_annotations": annotated_fields,
-            }).execute()
+            }
+
+            # Pre-check: the object may already be registered under the CAS
+            # regime (by content address) or the legacy regime (by the old
+            # folder path — legacy rows have NULL sha256 until backfill, so
+            # the unique index alone cannot catch this re-run).
+            existing = library.table("object").select("id, sha256").or_(
+                f"sha256.eq.{digest},path.eq.{legacy_path}"
+            ).limit(1).execute()
+            if existing.data:
+                # Curation lane: a re-run over an existing object is a
+                # deliberate metadata refresh. Never touches sha256/path —
+                # local bytes are not proof of stored bytes (x-upsert
+                # history), and identity is not a correction channel.
+                library.table("object").update(metadata).eq(
+                    "id", existing.data[0]["id"]).execute()
+                tqdm.write(f"[OK] refreshed metadata for {file.name}")
+                continue
+
+            # Store at the CAS path. No x-upsert: blobs are immutable under
+            # content addressing; "already exists" = the same bytes are
+            # already stored (success signal, e.g. a crashed prior run).
+            try:
+                supabase.storage.from_(BUCKET_NAME).upload(
+                    path, data, {"content-type": mimetype})
+            except Exception as e:
+                if not is_duplicate_error(e):
+                    raise
+
+            # supabase-py's upload response has no object id
+            # (supabase/supabase-py#1111) — recover it via info(). (The old
+            # list(search=...) hack hangs on bucket-root listings.)
+            info = supabase.storage.from_(BUCKET_NAME).info(path)
+            uploaded_obj_id = info.id if hasattr(info, "id") else info["id"]
+
+            try:
+                library.table("object").insert({
+                    "id": uploaded_obj_id,
+                    "path": path,
+                    "sha256": digest,
+                    **metadata,
+                }).execute()
+                tqdm.write(f"[OK] uploaded {file.name} as {path}")
+            except Exception as e:
+                # unique_violation: same bytes registered concurrently —
+                # first-writer-wins, adopt the existing row.
+                if "23505" in str(e):
+                    tqdm.write(f"[SKIP] {file.name}: already registered ({digest[:12]}…)")
+                    continue
+                raise
         except Exception as e:
             tqdm.write(f"[ERROR] {file.name}: {e}")
             continue
