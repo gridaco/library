@@ -126,6 +126,11 @@ outputs `.object.json` files.
 python upload.py /path/to/process
 ```
 
+**Developer corpus release**: Export a curated production category as a
+sanitized, checksummed fixture for local Grida development.
+
+See [`fixture_release/README.md`](./fixture_release/README.md).
+
 ## See Also
 
 Other open Grida asset libraries:
