@@ -107,7 +107,7 @@ outputs `.metadata.json` files.
 Needs ollama installed. Needs model with vision support.
 
 ```sh
-python describe.py /path/to/process --model=gemma3:27b
+python describe.py /path/to/process --model=gemma4:31b
 ```
 
 outputs `.describe.json` files.
