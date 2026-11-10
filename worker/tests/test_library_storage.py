@@ -194,6 +194,48 @@ class LibraryStorageTest(unittest.TestCase):
                 )
         self.stub.assert_no_pending_responses()
 
+    def test_manual_upload_without_checksum_metadata_requires_actual_byte_verification(self):
+        for omitted in (
+            ("ChecksumSHA256", "ChecksumType"),
+            ("ChecksumSHA256",),
+            ("ChecksumType",),
+        ):
+            with self.subTest(omitted=omitted):
+                self.stub.add_client_error(
+                    "put_object",
+                    "PreconditionFailed",
+                    http_status_code=412,
+                    expected_params=self.put,
+                )
+                head = {
+                    key: value for key, value in self.head.items() if key not in omitted
+                }
+                self.stub.add_response("head_object", head, self.head_request)
+                stream = self.add_get()
+                self.assertEqual(
+                    self.storage.upload(self.data, "image/png").sha256, self.digest
+                )
+                self.assertTrue(stream.closed)
+        self.stub.assert_no_pending_responses()
+
+    def test_manual_upload_without_checksum_metadata_cannot_adopt_wrong_body(self):
+        self.stub.add_client_error(
+            "put_object",
+            "PreconditionFailed",
+            http_status_code=412,
+            expected_params=self.put,
+        )
+        self.stub.add_response(
+            "head_object",
+            {"ContentLength": len(self.data), "ContentType": "image/png"},
+            self.head_request,
+        )
+        stream = self.add_get(b"x" * len(self.data))
+        with self.assertRaisesRegex(LibraryStorageError, "stored bytes"):
+            self.storage.upload(self.data, "image/png")
+        self.assertTrue(stream.closed)
+        self.stub.assert_no_pending_responses()
+
     def test_timeout_after_commit_recovers_without_overwrite(self):
         client = Mock()
         client.put_object.side_effect = EndpointConnectionError(
@@ -306,12 +348,9 @@ class LibraryStorageTest(unittest.TestCase):
             ("ContentType", "image/jpeg"),
             ("ChecksumSHA256", "wrong"),
             ("ChecksumType", "COMPOSITE"),
-            ("ChecksumType", None),
         ):
             with self.subTest(field=field, value=bad):
                 head = {**self.head, field: bad}
-                if bad is None:
-                    head.pop(field)
                 self.stub.add_response("put_object", {}, self.put)
                 self.stub.add_response("head_object", head, self.head_request)
                 with self.assertRaises(LibraryStorageError):

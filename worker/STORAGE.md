@@ -43,13 +43,15 @@ one pinned extension:
 
 The Tigris uploader accepts 1 byte through 30 MiB and rejects other MIME
 types. It uses create-only conditional PUTs. A conditional create sends the full
-SHA-256 checksum and checks MIME, size, and the reported full-object checksum.
-Reported checksums alone do not prove the body: an authenticated SDK GET then
-streams and independently hashes the actual stored bytes, checking exact
-length and MIME and closing the response on success or failure. This read is
-required for fresh uploads and adoption, including uncertain PUTs and
-already-present keys, before a catalog row can be inserted. The SDK can also
-reject a mismatched response checksum while reading; that fails registration.
+SHA-256 checksum. HEAD checks MIME and size; reported SHA-256 and checksum type
+must match when present. Trusted manual or custom CLI uploads may omit that
+checksum metadata. Reported checksums alone do not prove the body: an
+authenticated SDK GET then streams and independently hashes the actual stored
+bytes, checking exact length and MIME and closing the response on success or
+failure. This read is required for fresh uploads and adoption, including
+uncertain PUTs and already-present keys, before a catalog row can be inserted.
+The SDK can also reject a mismatched response checksum while reading; that
+fails registration.
 A failed registration may leave a reusable, content-addressed object;
 rerunning uses the same key.
 

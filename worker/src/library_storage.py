@@ -235,12 +235,13 @@ class LibraryStorage:
             if (
                 head.get("ContentLength") != len(data)
                 or head.get("ContentType") != mimetype
-                or head.get("ChecksumType") != "FULL_OBJECT"
-                or head.get("ChecksumSHA256") != checksum
+                or ("ChecksumType" in head and head["ChecksumType"] != "FULL_OBJECT")
+                or ("ChecksumSHA256" in head and head["ChecksumSHA256"] != checksum)
             ):
                 raise LibraryStorageError(
                     "Library Tigris object does not match its content address"
                 )
+            # Manual uploads may omit checksum metadata; readback proves bytes.
             self._verify_stored_bytes(client, path, digest, len(data), mimetype)
             return
 
