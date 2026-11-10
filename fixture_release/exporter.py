@@ -121,7 +121,7 @@ class FixtureExporter:
             path = str(raw.get("path") or "")
             if not path:
                 raise FixtureExportError("production object path is missing")
-            payload = self._source.download(path)
+            payload = self._source.download(raw)
             digest = hashlib.sha256(payload).hexdigest()
             recorded_digest = raw.get("sha256")
             if recorded_digest is not None and recorded_digest != digest:

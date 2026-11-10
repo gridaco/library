@@ -1,4 +1,4 @@
-boto3
+boto3>=1.40,<2
 click
 tqdm
 cairosvg

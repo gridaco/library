@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from embedding import embed_image, embed_text
 from metadata import object_metadata
+from library_storage import LibraryStorage, LibraryStorageError
 
 QUEUE_NAME = "grida_library_object_worker_jobs"
-BUCLET_NAME = "library"
 
 # ----------------------------------------------
 # Worker for Supabase pgmq queue 'grida_library_object_worker_jobs' using Supabase Python client
@@ -83,6 +83,7 @@ class EmbeddingWorker:
         self.supabase: Client = create_client(supabase_url, supabase_key)
         self.library_client = self.supabase.schema("grida_library")
         self.queue_client = self.supabase.schema("pgmq_public")
+        self.storage = LibraryStorage.from_environment(self.supabase)
         self.queue_name = queue_name
         self.poll_batch_size = poll_batch_size
         self.visibility_timeout = visibility_timeout
@@ -137,6 +138,28 @@ class EmbeddingWorker:
             "orientation": metadata.get("orientation"),
         }).eq("id", object_id).execute()
 
+    def load_object(self, payload: dict) -> tuple[bytes, str]:
+        if self.storage.provider == "tigris":
+            # Existing messages have UUID/path/MIME but no digest. Read the
+            # catalog instead of changing or replaying queue payloads.
+            result = (
+                self.library_client.table("object")
+                .select("path,sha256,mimetype,bytes")
+                .eq("id", payload["object_id"])
+                .maybe_single()
+                .execute()
+            )
+            asset = result.data if result else None
+            if not asset:
+                raise LibraryStorageError(
+                    "Queued Library object is missing from the catalog"
+                )
+            return self.storage.download(asset), asset["mimetype"]
+        # Preserve the existing transform in the default Supabase deployment.
+        return self.storage.download(payload, transform={"quality": 80}), payload.get(
+            "mimetype"
+        )
+
     def run(self):
         while running:
             try:
@@ -153,14 +176,7 @@ class EmbeddingWorker:
                         payload = message_body if isinstance(
                             message_body, dict) else json.loads(message_body)
                         object_id = payload["object_id"]
-                        object_path = payload["path"]
-                        obj = self.supabase.storage.from_(BUCLET_NAME)\
-                            .download(
-                                object_path, options={
-                                    "transform": {"quality": 80}
-                                })
-
-                        mimetype: str = payload.get("mimetype")
+                        obj, mimetype = self.load_object(payload)
                         logger.info(
                             "processing object_id=%s", object_id)
 

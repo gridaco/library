@@ -1,0 +1,35 @@
+name: Library storage and corpus tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            fixture_release/requirements.txt
+            worker/requirements.txt
+      - name: Install storage and corpus test dependencies
+        run: python -m pip install -r fixture_release/requirements.txt 'boto3>=1.40,<2'
+      - name: Test uploaders, storage and worker consumers
+        run: python -m unittest discover -s worker/tests
+      - name: Test sanitized corpus exports
+        run: python -m unittest discover -s fixture_release/tests

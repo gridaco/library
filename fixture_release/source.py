@@ -6,8 +6,8 @@ import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
 from urllib.request import urlopen
+from worker.src.library_storage import LibraryStorage, LibraryStorageError
 
 from .archive import LIBRARY_MAX_ASSET_BYTES
 from .model import FixtureExportError, JsonObject
@@ -58,28 +58,12 @@ def _assert_public_key(key: str) -> None:
 
 
 def _public_asset_url(supabase_url: str, path: str) -> str:
-    parts = urlsplit(supabase_url)
-    if (
-        parts.scheme not in {"http", "https"}
-        or not parts.netloc
-        or parts.username is not None
-        or parts.password is not None
-        or parts.path not in {"", "/"}
-        or parts.query
-        or parts.fragment
-    ):
-        raise FixtureExportError("SUPABASE_URL is not a valid HTTP origin")
-    if (
-        not path
-        or path.startswith("/")
-        or "\\" in path
-        or any(part in {"", ".", ".."} for part in path.split("/"))
-        or any(ord(character) < 32 or ord(character) == 127 for character in path)
-    ):
-        raise FixtureExportError("Library object has an invalid Storage path")
-    origin = f"{parts.scheme}://{parts.netloc}"
-    encoded_path = quote(path, safe="/")
-    return f"{origin}/storage/v1/object/public/library/{encoded_path}"
+    try:
+        return LibraryStorage().public_url({"path": path}, supabase_url=supabase_url)
+    except (LibraryStorageError, ValueError) as error:
+        raise FixtureExportError(
+            "Invalid public Library Storage URL or path"
+        ) from error
 
 
 class SupabaseLibrarySource:
@@ -96,6 +80,7 @@ class SupabaseLibrarySource:
         *,
         supabase_url: str | None = None,
         page_size: int = 500,
+        storage: LibraryStorage | None = None,
     ):
         if page_size < 1 or page_size > 1000:
             raise FixtureExportError("page size must be between 1 and 1000")
@@ -103,6 +88,7 @@ class SupabaseLibrarySource:
         self._library = client.schema("grida_library")
         self._supabase_url = supabase_url
         self._page_size = page_size
+        self._storage = storage or LibraryStorage()
 
     @classmethod
     def from_environment(
@@ -134,7 +120,11 @@ class SupabaseLibrarySource:
             raise FixtureExportError(
                 "could not initialize the configured Supabase client"
             ) from error
-        return cls(client, supabase_url=url, page_size=page_size)
+        try:
+            storage = LibraryStorage.from_environment()
+        except (LibraryStorageError, ValueError) as error:
+            raise FixtureExportError("Invalid Library storage configuration") from error
+        return cls(client, supabase_url=url, page_size=page_size, storage=storage)
 
     def resolve_category(self, identifier: str) -> JsonObject:
         by_id = self._execute(
@@ -214,12 +204,18 @@ class SupabaseLibrarySource:
             for row in response.data or []:
                 yield dict(row)
 
-    def download(self, path: str) -> bytes:
-        if self._supabase_url is None:
+    def download(self, asset: JsonObject) -> bytes:
+        path = asset.get("path")
+        if self._storage.provider == "supabase" and self._supabase_url is None:
             raise FixtureExportError(
                 "the Library source has no public Storage origin configured"
             )
-        url = _public_asset_url(self._supabase_url, path)
+        try:
+            url = self._storage.public_url(asset, supabase_url=self._supabase_url)
+        except (LibraryStorageError, ValueError) as error:
+            raise FixtureExportError(
+                "Invalid public Library object location"
+            ) from error
         try:
             with urlopen(url, timeout=60) as response:
                 payload = response.read(LIBRARY_MAX_ASSET_BYTES + 1)
@@ -233,6 +229,13 @@ class SupabaseLibrarySource:
             raise FixtureExportError(
                 f'Library object "{path}" exceeds the 3 MiB asset limit'
             )
+        if self._storage.provider == "tigris":
+            try:
+                self._storage.verify_download(asset, payload)
+            except LibraryStorageError as error:
+                raise FixtureExportError(
+                    "Downloaded Library object failed byte verification"
+                ) from error
         return payload
 
     @staticmethod

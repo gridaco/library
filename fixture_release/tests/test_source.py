@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import hashlib
+import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fixture_release import FixtureExportError
+from worker.src.library_storage import LibraryStorage
 from fixture_release.source import (
     OBJECT_SELECT,
     SupabaseLibrarySource,
@@ -204,12 +208,94 @@ class SupabaseLibrarySourceTest(unittest.TestCase):
             supabase_url="https://example.supabase.co",
         )
 
-        self.assertEqual(source.download("objects/a.png"), b"asset")
+        self.assertEqual(source.download({"path": "objects/a.png"}), b"asset")
         open_url.assert_called_once_with(
             "https://example.supabase.co/storage/v1/object/public/library/"
             "objects/a.png",
             timeout=60,
         )
+
+    @patch("fixture_release.source.urlopen")
+    def test_tigris_download_needs_no_storage_credential_and_uses_catalog_hash(
+        self, open_url
+    ):
+        payload = b"fixture-image-bytes"
+        digest = hashlib.sha256(payload).hexdigest()
+        asset = {
+            "path": "legacy/old-name.png",
+            "sha256": digest,
+            "mimetype": "image/png",
+            "bytes": len(payload),
+        }
+        source = SupabaseLibrarySource(
+            Client({"object": [], "category": []}),
+            storage=LibraryStorage(provider="tigris"),
+        )
+        open_url.return_value = DownloadResponse(payload)
+        self.assertEqual(source.download(asset), payload)
+        open_url.assert_called_once_with(
+            f"https://library.grida.co/{digest}.png", timeout=60
+        )
+
+    @patch("fixture_release.source.urlopen")
+    def test_tigris_download_rejects_missing_hash_and_corrupt_or_wrong_size_bytes(
+        self, open_url
+    ):
+        payload = b"fixture-image-bytes"
+        asset = {
+            "path": "legacy/old-name.png",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "mimetype": "image/png",
+            "bytes": len(payload),
+        }
+        source = SupabaseLibrarySource(
+            Client({"object": [], "category": []}),
+            storage=LibraryStorage(provider="tigris"),
+        )
+        with self.assertRaises(FixtureExportError):
+            source.download({**asset, "sha256": None})
+        open_url.assert_not_called()
+        for row, downloaded in ((asset, b"wrong"), ({**asset, "bytes": 1}, payload)):
+            open_url.return_value = DownloadResponse(downloaded)
+            with self.assertRaisesRegex(FixtureExportError, "verification"):
+                source.download(row)
+
+    @patch("dotenv.load_dotenv")
+    @patch("supabase.create_client")
+    def test_environment_selects_tigris_but_keeps_catalog_public_key_guard(
+        self, create_client, load_env
+    ):
+        create_client.return_value = Client({"object": [], "category": []})
+        environment = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+            "GRIDA_LIBRARY_STORAGE_PROVIDER": "tigris",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            source = SupabaseLibrarySource.from_environment(Path("unused.env"))
+        self.assertEqual(source._storage.provider, "tigris")
+        create_client.reset_mock()
+        with patch.dict(
+            os.environ,
+            {**environment, "SUPABASE_PUBLISHABLE_KEY": "sb_secret_test"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(FixtureExportError, "privileged"):
+                SupabaseLibrarySource.from_environment(Path("unused.env"))
+        create_client.assert_not_called()
+
+    def test_public_storage_url_rejects_origin_or_path_escape(self):
+        for origin in (
+            "https://user:secret@example.com",
+            "https://example.com/prefix",
+            "https://example.com/?query=x",
+            "https://example.com/#fragment",
+        ):
+            with self.subTest(origin=origin), self.assertRaises(FixtureExportError):
+                _public_asset_url(origin, "valid.png")
+        for path in ("//evil.example/a", "../a", "a/../../b", "a\\b", "a\n.png"):
+            with self.subTest(path=path), self.assertRaises(FixtureExportError):
+                _public_asset_url("https://example.supabase.co", path)
 
     def test_rejects_a_secret_supabase_key(self):
         with self.assertRaisesRegex(FixtureExportError, "privileged"):
