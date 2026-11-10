@@ -1,3 +1,4 @@
+boto3>=1.40,<2
 click
 cairosvg
 requests

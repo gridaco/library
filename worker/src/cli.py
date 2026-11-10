@@ -7,6 +7,7 @@ from tqdm import tqdm
 from supabase import create_client
 from embedding_transform import b64
 from embedding import embed_image, embed_text
+from library_storage import LibraryStorage
 
 
 @click.group()
@@ -32,6 +33,7 @@ def cli_dump(supabase_url, supabase_key, output, page_size, embedding_length):
     """
     sb = create_client(supabase_url, supabase_key)
     library = sb.schema("grida_library")
+    storage = LibraryStorage.from_environment(sb)
 
     # Get total count
     count_resp = (
@@ -51,7 +53,8 @@ def cli_dump(supabase_url, supabase_key, output, page_size, embedding_length):
             resp = (
                 library
                 .table("object")
-                .select("id,path,mimetype")
+                .select("id,path,sha256,mimetype,bytes")
+                .order("id")
                 .range(start, end)
                 .execute()
             )
@@ -61,9 +64,8 @@ def cli_dump(supabase_url, supabase_key, output, page_size, embedding_length):
 
             for obj in items:
                 try:
-                    path = obj["path"]
                     mimetype = obj.get("mimetype")
-                    dl = sb.storage.from_("library").download(path)
+                    dl = storage.download(obj)
                     img_b64 = b64(dl, mimetype)
                     record = {
                         "recordId": obj["id"],

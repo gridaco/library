@@ -7,10 +7,14 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
 from fixture_release import FixtureExporter, FixtureExportError
+from fixture_release.source import SupabaseLibrarySource
+from fixture_release.tests.test_source import Client, DownloadResponse
+from worker.src.library_storage import LibraryStorage
 from fixture_release.archive import (
     ZIP_EPOCH,
     FixtureArchive,
@@ -105,7 +109,8 @@ class FakeSource:
         if self.object["id"] in object_ids:
             yield self.object
 
-    def download(self, path):
+    def download(self, asset):
+        path = asset["path"]
         if path != self.object["path"]:
             raise AssertionError(path)
         return self.payload
@@ -142,8 +147,8 @@ class MultiSource(FakeSource):
             if row["id"] in object_ids:
                 yield row
 
-    def download(self, path):
-        return self.payloads[path]
+    def download(self, asset):
+        return self.payloads[asset["path"]]
 
 
 class FixtureExporterTest(unittest.TestCase):
@@ -155,6 +160,22 @@ class FixtureExporterTest(unittest.TestCase):
             "Developer corpus", output, limit=limit
         )
         return output, summary
+
+    @patch("fixture_release.source.urlopen")
+    def test_tigris_source_exports_the_same_sanitized_verified_archive(self, open_url):
+        fixture = FakeSource()
+        source = SupabaseLibrarySource(
+            Client({"category": [fixture.category], "object": [fixture.object]}),
+            storage=LibraryStorage(provider="tigris"),
+        )
+        open_url.return_value = DownloadResponse(fixture.payload)
+        output, summary = self.export(source)
+        manifest = FixtureArchive().verify_with_sidecar(output)
+        self.assertEqual(summary.object_count, 1)
+        self.assertEqual(manifest["object_count"], 1)
+        open_url.assert_called_once_with(
+            f"https://library.grida.co/{fixture.object['sha256']}.png", timeout=60
+        )
 
     def rewrite_valid_archive(self, output, mutate):
         with zipfile.ZipFile(output) as archive:

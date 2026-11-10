@@ -12,12 +12,17 @@ exporter.
 
 ## Safety boundary
 
-- The exporter performs read-only Library and public Storage calls.
+- The exporter performs read-only Library and public asset calls.
 - It loads `SUPABASE_URL` plus `SUPABASE_PUBLISHABLE_KEY`,
   `SUPABASE_ANON_KEY`, or a public `SUPABASE_KEY` from an environment file but
   never writes or prints either value. Privileged keys are rejected.
-- Asset bytes are downloaded from the unauthenticated public Storage URL. The
-  database client is used only for public, read-only Library rows.
+- Asset bytes are downloaded from the unauthenticated public Supabase Storage
+  URL by default. With `GRIDA_LIBRARY_STORAGE_PROVIDER=tigris`, downloads use
+  the catalog SHA-256 and pinned MIME extension at `https://library.grida.co`
+  (or `GRIDA_LIBRARY_ASSET_ORIGIN`), and verify SHA-256 and catalog byte size.
+  Missing or invalid hashes fail; there is no Supabase fallback in Tigris mode.
+  No Tigris credentials are needed. The database client is used only for
+  public, read-only Library rows.
 - Production object and Storage UUIDs are not written to
   the archive. Objects are keyed by the SHA-256 of their downloaded bytes.
 - Author data, authentication data, original Storage paths, prompts, and
@@ -54,6 +59,11 @@ uv pip install -r fixture_release/requirements.txt
 The repository's existing `.env` may provide `SUPABASE_URL` and a publishable
 or legacy anon key. A privileged service-role or secret key is intentionally
 rejected.
+
+The same environment file can explicitly select Tigris after the reviewed
+object copy and catalog hash backfill. See the [storage configuration](../worker/STORAGE.md).
+Keep the provider unset before cutover; exporting or verifying a corpus does
+not switch production storage, mutate catalog rows, or enqueue processing.
 
 ## Export
 
